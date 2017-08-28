@@ -19,7 +19,7 @@ normal_logger = logging.getLogger("normal")
 request_logger = logging.getLogger("request")
 
 class Request(object):
-    '''
+    """
     代表一个HTTP请求
 
     Args:
@@ -28,7 +28,7 @@ class Request(object):
         host: 服务器的主机名
         port: 服务器的端口
         addr: 客户端的地址，元组，分别是地址和端口
-    '''
+    """
     def __init__(self, app, client, host, port, addr):
         self.response = client.makefile()
         self.request = client.makefile()
@@ -158,16 +158,3 @@ class Server(object):
         while True:
             client, addr = self.server.accept()
             gevent.spawn(self.handler, client, addr)
-
-if __name__ == '__main__':
-
-    from flask import Flask
-
-    application = Flask(__name__)
-
-    @application.route('/hello', methods=["GET"])
-    def hello():
-        return "AC"
-
-    server = Server(application)
-    server.start()
