@@ -6,8 +6,10 @@ gevent.monkey.patch_all()
 
 import sys
 import gevent
+import StringIO
 import urlparse
 import socket
+import traceback
 import logging
 import logging.config
 
@@ -36,7 +38,7 @@ class Request(object):
         self.host = host
         self.port = port
         self.clientaddr = addr
-        self.version = "HTTP/1.0"
+        self.version = "HTTP/1.1"
         self.app = app
         self.serve()
 
@@ -55,37 +57,77 @@ class Request(object):
         response_header = ""
         response_header += self.version + " "
         response_header += status + '\r\n'
+        response_headers.append(("Connection","Keep-Alive"))
         for header in response_headers:
             response_header += '%s:%s\r\n'%(header[0], header[1])
         response_header += "\r\n"
-        self.response.write(response_header)
-        request_logger.info("", extra={
-            "method": "GET",
-            "ip": self.clientaddr[0],
-            "path": self.env['PATH_INFO'] + (
-                "?" + self.env['QUERY_STRING'] if not self.env['QUERY_STRING'] == ""
-                else "")
-            })
+        self.client.send(response_header)
+        # request_logger.info("", extra={
+        #     "method": "GET",
+        #     "ip": self.clientaddr[0],
+        #     "path": self.env['PATH_INFO'] + (
+        #         "?" + self.env['QUERY_STRING'] if not self.env['QUERY_STRING'] == ""
+        #         else "")
+        #     })
         return self.response.write
 
     def serve(self):
         """
-        开始一个处理请求
+        利用该socket连接进行多个请求
 
         Raises:
-            Exception: 捕获所有读取回应body时出现的错误并返回一个500错误
+            Exception: 捕获所有读取并关闭连接
         """
-        request_line = self.request.readline()
-        method, path, version = request_line.split(' ')
+        timer = gevent.Timeout(5)
+        with timer:
+            try:
+                while True:
+                    env = self._read_one_requests()
+                    for part in self.app(env, self.start_response):
+                        self.client.send(part)
+                    if (env["SERVER_PROTOCOL"] == "HTTP/1.0" and ("HTTP_CONNECTION" not in env or env["HTTP_CONNECTION"] != "Keep-Alive")) \
+                                                 or \
+                                                 "HTTP_CONNECTION" in env and env['HTTP_CONNECTION'] == 'Close':
+                        self.client.close()
+                        break
+                    timer.cancel()
+                    timer = timer.start_new(5)
+            except gevent.timeout.Timeout:
+                self.client.close()
+            except Exception, ex:
+                # traceback.print_exc()
+                self.client.close()
+            
+    
+    def _read_one_requests(self):
+        """
+        从socket中读取一次请求
+
+        Returns:
+            env: 本次请求的env字典
+        
+        Raises:
+            Exception: 各类异常，直接抛出到外部关闭连接
+        """
+        first_line = self.request.readline()
+        # 读取到空行
+        if not first_line:
+            raise Exception("read nothing")
+        request_line = first_line.strip().split(' ')
+        # 请求行有误
+        if len(request_line) != 3 \
+            or request_line[2] not in ["HTTP/1.0", "HTTP/1.1"]:
+            raise Exception("request line wrong format")
+        method, path, version = request_line
         headers = {}
-        self.request.readline()
         # 读取所有报文头
         while True:
             line = self.request.readline().strip()
             if line == "":
                 break
             x = line.split(":")
-            headers['HTTP_'+x[0].strip().upper().replace("-", "_")] = x[1].strip()
+            if len(x) >= 2:
+                headers['HTTP_'+x[0].strip().upper().replace("-", "_")] = ":".join(x[1:]).strip()
         # 获取URL Parse对象
         urlparsed = urlparse.urlparse(path)
         # 设置env字典
@@ -102,24 +144,27 @@ class Request(object):
 
             "wsgi.version": (1, 0),
             "wsgi.url_scheme": "http",
-            "wsgi.input": self.request,
             "wsgi.errors": sys.stdout,
             "wsgi.multithread": False,
             "wsgi.multiprocess": False,
             "wsgi.run_once": False
         }
         env.update(headers)
-        self.env = env
-        # 调用application，传入env字典和start_response函数
-        try:
-            for part in self.app(env, self.start_response):
-                self.response.write(part)
-        except Exception, ex:
-            print ex
-            self.start_response("500 Internal Server Error", [('Content-Length', '5')])
-            self.response.write("ERROR\r\n")
-        finally:
-            self.client.close()
+        
+        # 将HTTP报文主体读取到StringIO中
+        content_length = 0
+        if env["CONTENT_LENGTH"]:
+            try:
+                content_length = int(env["CONTENT_LENGTH"], 10)
+            except Exception, ex:
+                # content-length头非数字
+                raise Exception("wrong content-length")
+        if content_length > 0:
+            buf = StringIO.StringIO(self.client.recv(content_length))
+        else:
+            buf = StringIO.StringIO("")
+        env['wsgi.input'] = buf
+        return env
 
 
 class Server(object):
