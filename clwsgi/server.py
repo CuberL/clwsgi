@@ -29,7 +29,7 @@ class Request(object):
         client: 一个连接了客户端（浏览器）的socket连接
         host: 服务器的主机名
         port: 服务器的端口
-        addr: 客户端的地址，元组，分别是地址和端口
+        addr: 元组，客户端的地址和端口
     """
     def __init__(self, app, client, host, port, addr):
         self.response = client.makefile()
@@ -57,9 +57,10 @@ class Request(object):
         response_header = ""
         response_header += self.version + " "
         response_header += status + '\r\n'
-        response_headers.append(("Connection","Keep-Alive"))
+        response_headers.append(("Connection", "Keep-Alive"))
+        response_headers.append(("Server", "clwsgi/0.0.1"))
         for header in response_headers:
-            response_header += '%s:%s\r\n'%(header[0], header[1])
+            response_header += '%s: %s\r\n'%(header[0], header[1]) # 冒号后如果没有空格，ab读取错误
         response_header += "\r\n"
         self.client.send(response_header)
         # request_logger.info("", extra={
@@ -79,15 +80,18 @@ class Request(object):
             Exception: 捕获所有读取并关闭连接
         """
         timer = gevent.Timeout(5)
+        # normal_logger.info("Create new tcp connection")
         with timer:
             try:
                 while True:
                     env = self._read_one_requests()
+                    # print env
                     for part in self.app(env, self.start_response):
                         self.client.send(part)
+                    # self.client.send("\r\n\r\n")
                     if (env["SERVER_PROTOCOL"] == "HTTP/1.0" and ("HTTP_CONNECTION" not in env or env["HTTP_CONNECTION"] != "Keep-Alive")) \
                                                  or \
-                                                 "HTTP_CONNECTION" in env and env['HTTP_CONNECTION'] == 'Close':
+                                                 "HTTP_CONNECTION" in env and env['HTTP_CONNECTION'] == 'close':
                         self.client.close()
                         break
                     timer.cancel()
@@ -157,7 +161,7 @@ class Request(object):
             try:
                 content_length = int(env["CONTENT_LENGTH"], 10)
             except Exception, ex:
-                # content-length头非数字
+                # content-length非数字
                 raise Exception("wrong content-length")
         if content_length > 0:
             buf = StringIO.StringIO(self.client.recv(content_length))
@@ -193,6 +197,13 @@ class Server(object):
             client: 连接客户端（服务器）的socket连接
             addr: 客户端的地址，二元组，包括地址和端口
         """
+#         client.recv(1024)
+#         client.send('''HTTP/1.0 200 OK
+# Content-Length: 5
+            
+# HELLO'''
+#             )
+#         client.close()
         Request(self.app, client, self.host, self.port, addr)
 
     def start(self):
@@ -203,3 +214,15 @@ class Server(object):
         while True:
             client, addr = self.server.accept()
             gevent.spawn(self.handler, client, addr)
+
+if __name__ == "__main__":
+    from flask import Flask
+
+    app = Flask(__name__)
+    
+    @app.route("/")
+    def index():
+        return "HELLO"*1
+
+    server = Server(app)
+    server.start()
