@@ -7,6 +7,7 @@ gevent.monkey.patch_all()
 import sys
 import gevent
 import StringIO
+import multiprocessing
 import urlparse
 import socket
 import traceback
@@ -170,6 +171,29 @@ class Request(object):
         env['wsgi.input'] = buf
         return env
 
+class Worker(multiprocessing.Process):
+    def __init__(self, app, host, port, sock):
+        multiprocessing.Process.__init__(self)
+        self.sock = sock
+        self.app = app
+        self.host = host
+        self.port = port
+
+    def handler(self, client, addr):
+        """
+        协程，启动一个Request
+
+        Args:
+            client: 连接客户端（服务器）的socket连接
+            addr: 客户端的地址，二元组，包括地址和端口
+        """
+        Request(self.app, client, self.host, self.port, addr)
+    
+    def run(self):
+        normal_logger.info("Worker start @pid=%d"%(multiprocessing.current_process().pid))
+        while True:
+            client, addr = self.sock.accept()
+            gevent.spawn(self.handler, client, addr)
 
 class Server(object):
     """
@@ -180,40 +204,27 @@ class Server(object):
         host: 服务器端监听的地址
         port: 服务器端监听的端口
     """
-    def __init__(self, app, host="0.0.0.0", port=6044):
+    def __init__(self, app, host="0.0.0.0", port=6044, worker=4):
         self.app = app
         self.host = host
         self.port = port
+        self.worker = worker
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server.bind((host, port))
-        self.server.listen(1000)
-
-    def handler(self, client, addr):
-        """
-        协程，启动一个Request
-
-        Args:
-            client: 连接客户端（服务器）的socket连接
-            addr: 客户端的地址，二元组，包括地址和端口
-        """
-#         client.recv(1024)
-#         client.send('''HTTP/1.0 200 OK
-# Content-Length: 5
-            
-# HELLO'''
-#             )
-#         client.close()
-        Request(self.app, client, self.host, self.port, addr)
+        self.server.listen(4000)
 
     def start(self):
         """
         启动服务器
         """
-        normal_logger.info("Listening on %s:%s"%(self.host, self.port))
-        while True:
-            client, addr = self.server.accept()
-            gevent.spawn(self.handler, client, addr)
+        processes = []
+        for i in range(self.worker):
+            process = Worker(self.app, self.host, self.port, self.server)
+            process.start()
+            processes.append(process)
+
+        processes[0].join()
 
 if __name__ == "__main__":
     from flask import Flask
@@ -222,7 +233,7 @@ if __name__ == "__main__":
     
     @app.route("/")
     def index():
-        return "HELLO"*1
+        return "HELLO"*1000
 
-    server = Server(app)
+    server = Server(app, worker=4)
     server.start()
