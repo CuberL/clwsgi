@@ -6,7 +6,7 @@ clwsgi是一个基于gevent的WSGI服务器，实现标准是PEP333，可以与�
 
 ```python
 from flask import Flask
-from clwsgi import Server
+from clwsgi.server import Server
 
 app = Flask(__name__)
 
